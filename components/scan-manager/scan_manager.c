@@ -1,6 +1,8 @@
 #include <string.h>
 #include "esp_log.h"
 #include "pwm_capture.h"
+#include "pwm_capture.h"
+#include "capture_event_data.h"
 #include "scan_manager.h"
 
 
@@ -8,9 +10,10 @@
 static const char* TAG = "scan manager";
 #define         MAX_CHANNELS                6
 #define         MAX_CHANNELS_PER_UNIT       3
-
-
-
+#define         MAX_SCANNERS                2   //Maximum number of scanners, so two keypads at max
+#define         QUEUE_LENGTH                50
+#define         QUEUE_WAIT_TIME             5  //ms             
+#define         QUEUE_WAIT_TICKS            (pdMS_TO_TICKS(QUEUE_WAIT_TIME))
 
 
 
@@ -25,6 +28,64 @@ static const char* TAG = "scan manager";
         const typeof( ((type *)0)->member ) *__mptr = (ptr);    \
         (type *)( (char *)__mptr - offsetof(type,member) );})
 
+
+
+//This needs to be modified with void pointers because to avoid includong pwm_capture.h  here
+struct scanner{
+    uint8_t total_lines;
+    pwm_capture_class_data_t* class_data;    //data share among all the members
+    pwm_capture_t* list;                    //Initialized internally
+    QueueHandle_t queue;                    //Separate Queue for each capture unit bcz ISR queue API doesn't wait and fails immediately
+    TaskHandle_t capture_task;              //Corresponding task
+    scanner_interface_t interface;
+};
+
+typedef struct scanner scanner_t;
+
+/*This is the static pool from where users will get the scanner objects, so no dynamic alloc*/
+typedef struct scanner_pool{
+
+    scanner_t sc[MAX_SCANNERS];
+    uint8_t count;
+}scanner_pool_t;
+
+
+static scanner_pool_t pool;
+//typedef struct pulse_scanner scanner_t;
+
+
+
+
+/// @brief This task receives data from multiple capture objects
+/// @param args 
+static void task_processScannerQueue(void* args){
+
+
+    scanner_t* self=(scanner_t*) args;
+
+    QueueHandle_t queue=self->queue;
+
+    scanner_event_data_t scn_evt_data;
+    callbackForScanner cb=self->interface.callback;
+    while(1){
+        if(xQueueReceive(queue,&scn_evt_data,portMAX_DELAY)==pdTRUE){
+            cb(&scn_evt_data);
+
+        }
+    }
+
+}
+
+
+
+
+
+static void callback(scanner_event_data_t* data,void* context){
+
+    scanner_t* self=(scanner_t*) context;
+    QueueHandle_t queue=self->queue;
+    xQueueSend(queue,data,QUEUE_WAIT_TICKS);
+}
 
 static int startScanning(scanner_interface_t* self){
 
@@ -47,40 +108,40 @@ static int startScanning(scanner_interface_t* self){
 
 
 
-size_t scannerGetSize(uint8_t total_gpio,uint8_t total_signals){
-    if(total_gpio==0 || total_signals==0)
-        return -1;
+/// @brief Get one element of pool, and increment the count. Not thread safe
+/// @return 
+static scanner_t* poolGet(){
+    
+    if(pool.count==MAX_SCANNERS)
+        return NULL;
+    
+    scanner_t* self=&pool.sc[pool.count];
+        pool.count++;
+    return self;
 
+}
 
-    //This is for the pulse scanner instance
-    size_t size=sizeof(scanner_t);
-    //The capture lines , 4 for a n*4 keypad
-    size+=sizeof(pwm_capture_t)*total_gpio;
+static void poolReturn(){
 
+    pool.count--;
 
-    //This is for the class data shared by all the pwm_capture objects
-    //Class data will be separate for each
-    size+=sizeof(pwm_capture_class_data_t);
-
-    /*The internals of the class_data are not included bcz they will be allocated using malloc
-        Because iit is a never ending chain of getting sizes
-    */
-
-    //The total signals , 4 for a 4*n keypad
-    //size+=sizeof(uint32_t)*total_signals;
-
-    //size+
-
-    return size;
 }
 
 
 
+scanner_interface_t* scannerCreate(scanner_config_t* config){
 
-int scannerCreate(scanner_t* self,scanner_config_t* config){
 
+    //All scanners already allocated
+
+    scanner_t* self=poolGet();
+
+    
     if(self==NULL || config==NULL)
-        return ERR_SCANNER_INVALID_MEM;
+        return NULL;
+
+    //Get one  scanner_t element from pool
+    
     
     uint8_t total_gpio=config->total_gpio; 
     uint8_t* gpio_no=config->gpio_no;
@@ -111,7 +172,11 @@ int scannerCreate(scanner_t* self,scanner_config_t* config){
     //Class data init of capture object
     //Restart if error
     int ret=0;
-    ESP_ERROR_CHECK(captureClassDataInit(class_data,min_width, tolerance,pwm_widths_array,total_gpio,total_signals, cb));
+    /*The callback paramter passed here is the intermediate callback defined in this file
+    The callback paramter received in this function is the user callback called by this callback
+    defined in this file
+    */
+    ESP_ERROR_CHECK(captureClassDataInit(class_data,min_width, tolerance,pwm_widths_array,total_gpio,total_signals, callback,(void*)self));
 
     self->class_data=class_data;
     /*
@@ -135,7 +200,22 @@ int scannerCreate(scanner_t* self,scanner_config_t* config){
     }
 
 
-    return 0;
+    self->queue=xQueueCreate(QUEUE_LENGTH,sizeof(scanner_event_data_t));
+    if(self->queue==NULL){
+        poolReturn();           //Give the element back. Just decrements the pointer, bcz actual element is never moved
+        return NULL;
+    }
+
+    if(xTaskCreate(task_processScannerQueue,"merge_captures",4096,(void*) self,0,&self->capture_task)!=pdPASS){
+        poolReturn();
+        return NULL;
+    }
+
+
+ 
+
+
+    return &(self->interface);
 
 }
 

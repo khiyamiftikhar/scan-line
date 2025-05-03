@@ -1,15 +1,13 @@
 #ifndef SCANNER_H
 #define SCANNER_H
 
-#include "pwm_capture.h"
 #include "capture_event_data.h"
-
 
 
 
 #define ERR_SCANNER_BASE                    0
 #define ERR_SCANNER_INVALID_MEM             (ERR_SCANNER_BASE-1)
-
+#define ERR_SCANNER_MEM_ALLOC               (ERR_SCANNER_BASE-2)
 
 
 typedef struct scanner_interface{
@@ -24,17 +22,7 @@ typedef struct scanner_interface{
 }scanner_interface_t;
 
 
-typedef struct pulse_scanner{
-    uint8_t total_lines;
-    pwm_capture_class_data_t* class_data;    //data share among all the members
-    pwm_capture_t* list;                    //Initialized internally
-    scanner_interface_t interface;
-}scanner_t;
 
-
-
-
-//typedef struct pulse_scanner scanner_t;
 
 
 
@@ -46,6 +34,8 @@ typedef void (*callbackForScanner)(scanner_event_data_t* event_data);
 
 typedef struct scanner_config{
     uint8_t total_gpio; 
+    TaskHandle_t scanner_task;
+    QueueHandle_t queue;
     uint8_t* gpio_no;
     uint8_t total_signals;
     uint32_t* pwm_widths_array;
@@ -55,14 +45,13 @@ typedef struct scanner_config{
 }scanner_config_t;
 
 
+
+
+
+
 //not used bcz struct shard in header
 //size_t scannerGetSize(uint8_t total_gpio, uint8_t total_signals);
-int scannerCreate(scanner_t* self,scanner_config_t* config);
-
-
-
-
-
+scanner_interface_t* scannerCreate(scanner_config_t* config);
 
 
 #endif

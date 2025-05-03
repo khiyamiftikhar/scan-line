@@ -103,7 +103,8 @@ static void task_processCaptureQueue(void* args){
 
 
 
-    pwm_capture_class_data_t* class_data = (pwm_capture_class_data_t*) args;
+    pwm_capture_t * self=(pwm_capture_t *)args;
+    pwm_capture_class_data_t* class_data = self->class_data;
 
     uint32_t min_width=class_data->min_width;
     uint32_t* standard_pwm_widths=class_data->pulse_widths;
@@ -115,9 +116,11 @@ static void task_processCaptureQueue(void* args){
     capture_event_data_t capture_evt_data;
     scanner_event_data_t scanner_evt_data;
 
+    //QueueHandle_t queue=self->queue;
+
     while(1){
 
-        if(xQueueReceive(class_data->queue,&capture_evt_data,portMAX_DELAY)==pdTRUE){
+        if(xQueueReceive(self->queue,&capture_evt_data,portMAX_DELAY)==pdTRUE){
 
            // ESP_LOGI(TAG,"wow");
             //Calculate Time in us from ticks
@@ -135,7 +138,7 @@ static void task_processCaptureQueue(void* args){
 
                 scanner_evt_data.line_number=capture_evt_data.cap_obj->gpio_num;
                 scanner_evt_data.source_number=id;
-                cb(&scanner_evt_data);  //So this is carrying the weight till user is informed
+                cb(&scanner_evt_data,class_data->context);  //So this is carrying the weight till user is informed
 
             }
             
@@ -145,7 +148,7 @@ static void task_processCaptureQueue(void* args){
         }
 
 
-        }
+    }
 }
 
 
@@ -207,7 +210,7 @@ static bool captureCallback(mcpwm_cap_channel_handle_t cap_chan, const mcpwm_cap
                                         .pulse_width_ticks=tof_ticks
                                         };
         // notify the task to calculate the distance
-        xQueueSendFromISR(self->class_data->queue,&evt_data,&high_task_wakeup);
+        xQueueSendFromISR(self->queue,&evt_data,&high_task_wakeup);
         portYIELD_FROM_ISR(high_task_wakeup); // Switch to the woken task ASAP
     }
 
@@ -234,18 +237,13 @@ static int timerCreate(mcpwm_cap_timer_handle_t* cap_timer,mcpwm_capture_timer_c
 
 
 
-int captureClassDataInit(pwm_capture_class_data_t* self,uint32_t min_width, uint32_t tolerance,uint32_t* pwm_widths_array,uint8_t total_gpio,uint8_t total_signals, callbackForCapture cb){
+int captureClassDataInit(pwm_capture_class_data_t* self,uint32_t min_width, uint32_t tolerance,uint32_t* pwm_widths_array,uint8_t total_gpio,uint8_t total_signals, callbackForCapture cb, void* context){
 
     int ret=0;
-    if(self==NULL || cb==NULL)
+    if(self==NULL || cb==NULL || context==NULL)
         return ERR_CAPTURE_INVALID_ARGS;
 
-    self->queue=xQueueCreate(QUEUE_LENGTH,sizeof(capture_event_data_t));
-    if(self->queue==NULL)
-        return ERR_CAPTURE_MEM_ALLOC;
-
-
-    //Very rigig logid. Fit For esp32, which has 2 MCPWM groups each supporting 3 capture units
+     //Very rigig logid. Fit For esp32, which has 2 MCPWM groups each supporting 3 capture units
     if(total_gpio>MAX_CHANNELS)
         return -1;
     else if(total_gpio>MAX_CHANNELS_PER_UNIT)
@@ -284,11 +282,10 @@ int captureClassDataInit(pwm_capture_class_data_t* self,uint32_t min_width, uint
 
     self->callback=cb;
     self->tolerance=tolerance;
-
+    self->context=context;
     
 
-    if(xTaskCreate(task_processCaptureQueue,"readQueue",4096,(void*) self,0,&self->capture_task)!=pdPASS)
-        return ERR_CAPTURE_MEM_ALLOC;
+    
     
 
     return 0;
@@ -310,7 +307,7 @@ int captureCreate(pwm_capture_t* self,  pwm_capture_class_data_t* class_data,uin
 
     self->class_data=class_data;    
     //If true it means initialization not done
-    if(self->class_data->queue==NULL)
+    if(self->class_data->timer==NULL)
         return ERR_CAPTURE_INVALID_ARGS;
     
 
@@ -371,6 +368,17 @@ int captureCreate(pwm_capture_t* self,  pwm_capture_class_data_t* class_data,uin
     //container_of too difficult
     self->interface.startMonitoring=startMonitoring;
     self->interface.stopMonitoring=stopMonitoring;
+
+    /*The queue is now exclusive to each capture object so that xQueueSendFromISR never fails because
+    of conflict. There is however still  chance of failing if its queue is fill*/
+
+    self->queue=xQueueCreate(QUEUE_LENGTH,sizeof(capture_event_data_t));
+    if(self->queue==NULL)
+        return ERR_CAPTURE_MEM_ALLOC;
+
+    if(xTaskCreate(task_processCaptureQueue,"readQueue",4096,(void*) self,0,&self->capture_task)!=pdPASS)
+        return ERR_CAPTURE_MEM_ALLOC;
+
 
     return 0;
 
