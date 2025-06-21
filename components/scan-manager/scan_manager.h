@@ -27,21 +27,23 @@ typedef struct scanner_interface{
 
 
 //This is defined separately just so that the scannerCreate callback parameter is simple
-typedef void (*callbackForScanner)(scanner_event_data_t* event_data);
+//Scanner object creation results in a pointer
+typedef void (*callbackForScanner)(scanner_event_data_t* event_data,void* context);
 
 
 
 
 typedef struct scanner_config{
     uint8_t total_gpio; 
-    TaskHandle_t scanner_task;
-    QueueHandle_t queue;
+    //TaskHandle_t scanner_task;
+    ///QueueHandle_t queue;
     uint8_t* gpio_no;
     uint8_t total_signals;
     uint32_t* pwm_widths_array;
     uint32_t tolerance;
     uint32_t min_width;
     callbackForScanner cb;
+    void* context;
 }scanner_config_t;
 
 
