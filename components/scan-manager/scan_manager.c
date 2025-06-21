@@ -1,3 +1,14 @@
+/*
+
+The design not well though the multiple instances of scan manager. The ESPIDF internally keeps record
+oof the channels assigned and there is no explicit way to specify the channel. Only timer group can be
+told. There are two groups and each has 3 channels. When API call is called with timer group 0, one by
+one each vacant channels will be assigned. So this implementation as of yet does not maintain record 
+as how many channels have been used and which group to use now
+capture channels
+*/
+
+
 #include <string.h>
 #include "esp_log.h"
 #include "pwm_capture.h"
@@ -38,6 +49,7 @@ struct scanner{
     QueueHandle_t queue;                    //Separate Queue for each capture unit bcz ISR queue API doesn't wait and fails immediately
     TaskHandle_t capture_task;              //Corresponding task
     scanner_interface_t interface;
+    void* context;
 };
 
 typedef struct scanner scanner_t;
@@ -69,7 +81,7 @@ static void task_processScannerQueue(void* args){
     callbackForScanner cb=self->interface.callback;
     while(1){
         if(xQueueReceive(queue,&scn_evt_data,portMAX_DELAY)==pdTRUE){
-            cb(&scn_evt_data);
+            cb(&scn_evt_data,self->context);
 
         }
     }
@@ -166,6 +178,7 @@ scanner_interface_t* scannerCreate(scanner_config_t* config){
     self->total_lines=total_gpio;
     self->interface.callback=cb;
     self->interface.startScanning=startScanning;
+    self->context=config->context;
     
     
     
