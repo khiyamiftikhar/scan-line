@@ -1,4 +1,15 @@
+/*
 
+
+There is no explicit way to tell the channel required. The channel api of capture unit keeps track 
+of the channels assigned internally and automatically assigns the next channel based on the timer group
+provided. So if timer group zero is used in three calls, all three channels will be provided one by one.
+When the 4th call will be made it will fail. So next timer group should be provided in call
+
+
+
+
+*/
 
 #include <string.h>
 #include "math.h"
