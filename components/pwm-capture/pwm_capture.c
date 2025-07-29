@@ -137,7 +137,7 @@ static void task_processCaptureQueue(void* args){
             //Calculate Time in us from ticks
             uint32_t received_pulse_width=calculatePulseTime(capture_evt_data.pulse_width_ticks);
 
-            ESP_LOGI(TAG,"PW %lu",received_pulse_width);
+            //ESP_LOGI(TAG,"PW %lu",received_pulse_width);
 
             if(received_pulse_width<min_width)
                 continue;
@@ -147,7 +147,7 @@ static void task_processCaptureQueue(void* args){
             //If true it means a match is found
             if(id>=0){
 
-                scanner_evt_data.line_number=capture_evt_data.cap_obj->gpio_num;
+                scanner_evt_data.line_number=capture_evt_data.cap_obj->index;
                 scanner_evt_data.source_number=id;
                 cb(&scanner_evt_data,class_data->context);  //So this is carrying the weight till user is informed
 
@@ -257,10 +257,15 @@ int captureClassDataInit(pwm_capture_class_data_t* self,uint32_t min_width, uint
      //Very rigig logid. Fit For esp32, which has 2 MCPWM groups each supporting 3 capture units
     if(total_gpio>MAX_CHANNELS)
         return -1;
-    else if(total_gpio>MAX_CHANNELS_PER_UNIT)
+    else if(total_gpio>MAX_CHANNELS_PER_UNIT){
         self->timer=(cap_timer_t*)malloc(sizeof(cap_timer_t)*2);
-    else
+
+        memset(self->timer,0,sizeof(cap_timer_t)*2);
+    }
+    else{
         self->timer=(cap_timer_t*)malloc(sizeof(cap_timer_t));
+        memset(self->timer,0,sizeof(cap_timer_t));
+    }
 
     mcpwm_cap_timer_handle_t* cap_timer = &self->timer->cap_timer;
     mcpwm_capture_timer_config_t* cap_timer_config=&self->timer->cap_conf;
@@ -341,6 +346,7 @@ int captureCreate(pwm_capture_t* self,  pwm_capture_class_data_t* class_data,uin
         self->cap_timer=*cap_timer;
     }
     else{
+        ESP_LOGI(TAG,"group 2");
         group_id=1;     
         cap_timer = &self->class_data->timer[1].cap_timer;
         //Assign the instance cap_timer to the appropriater timer handle
