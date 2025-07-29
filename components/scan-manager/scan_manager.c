@@ -96,6 +96,7 @@ static void callback(scanner_event_data_t* data,void* context){
 
     scanner_t* self=(scanner_t*) context;
     QueueHandle_t queue=self->queue;
+
     xQueueSend(queue,data,QUEUE_WAIT_TICKS);
 }
 
@@ -205,7 +206,9 @@ scanner_interface_t* scannerCreate(scanner_config_t* config){
         memset(&self->list[i],0,sizeof(pwm_capture_t));
         //Assign each member of the list which is pwm_capture_t type
         self->list[i].class_data=class_data;
+        self->list[i].index=i;                  //So that send index number instead of gpio number in callback
         ESP_ERROR_CHECK(captureCreate(&self->list[i],class_data,gpio_no[i]));
+        self->class_data->count++;
         
         /*
         if(ret!=0)
