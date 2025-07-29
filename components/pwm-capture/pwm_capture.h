@@ -55,6 +55,7 @@ typedef struct pwm_capture{
 
     pwm_capture_class_data_t* class_data;       //only one instance. All instances will share it.
     uint8_t gpio_num;
+    uint8_t index;                          //its index number in the array of gpio;
     QueueHandle_t queue;                    //Separate Queue for each capture unit bcz ISR queue API doesn't wait and fails immediately
     TaskHandle_t capture_task;              //Corresponding task
     mcpwm_cap_timer_handle_t cap_timer;         //different for different instances depending upon their mcpwm group
