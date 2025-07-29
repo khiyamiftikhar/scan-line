@@ -18,7 +18,7 @@ typedef struct scanner_interface{
         and purpose of self referencing is to access the private members of an instance which are
         different for each because they are also at different unique addresses
     */
-    void (*callback)(scanner_event_data_t* event_data);
+    void (*callback)(scanner_event_data_t* event_data,void* context);
 }scanner_interface_t;
 
 
