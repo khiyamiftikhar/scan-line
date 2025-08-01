@@ -4,4 +4,4 @@ dependencies:
     path: components/capture-line-interface
   common:
     git: https://github.com/khiyamiftikhar/scan-line.git
-    path: components/common
+    path: components/scanner-common
