@@ -1,4 +1,0 @@
-dependencies:
-  pwm-capture:
-    path: "../pwm-capture"
-  
