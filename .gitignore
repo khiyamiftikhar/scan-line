@@ -1,2 +1,7 @@
-/build
-/.vscode
+build/
+.vscode/
+build*/
+build-*/
+dependencies.lock
+sdkconfig
+sdkconfig.old
