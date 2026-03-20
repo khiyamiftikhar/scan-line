@@ -45,7 +45,9 @@ typedef struct{
 }pulse_decoder_config_t;
 
 
-esp_err_t pulseDecoderCreate(pulse_decoder_config_t* config, pulse_decoder_interface_t* interface);
+esp_err_t pulseDecoderCreate(pulse_decoder_config_t    *config,
+                              pulse_decoder_interface_t **out_if);
+
 
 
 
