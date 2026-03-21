@@ -1,0 +1,10 @@
+idf_component_register(SRCS "test_pulse_decoder.c"
+                        INCLUDE_DIRS "."
+                        PRIV_REQUIRES
+                                unity
+                                pulse-decoder        # your component under test
+                                driver               # gpio_config, gpio_set_level
+                                esp_rom              # esp_rom_delay_us, esp_rom_gpio_connect_in/out_signal
+                                esp_hw_support       # gpio_hal_get_in_signal_from_gpio_num
+                                freertos             # xSemaphoreCreateBinary, xSemaphoreTake etc
+                        )
