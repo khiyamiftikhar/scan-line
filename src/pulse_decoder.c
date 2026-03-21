@@ -4,6 +4,17 @@
  * Uses the ESP-IDF MCPWM Capture peripheral to measure PWM pulse widths and
  * identify which of N registered signals was received.
  *
+ * Multi-chip resolution strategy
+ * ──────────────────────────────
+ * We request resolution_hz = 1,000,000 (1 tick = 1 µs) in the timer config.
+ * On chips with SOC_MCPWM_CAPTURE_CLK_FROM_GROUP (ESP32-S3, C3, H2 ...) this
+ * takes effect and cap_value is delivered in µs directly.
+ * On the original ESP32 the hardware has no prescaler and ignores resolution_hz,
+ * always running at APB (80 MHz).
+ * After timer creation we call mcpwm_capture_timer_get_resolution() to read
+ * back the ACTUAL resolution the hardware is using.  All tick↔µs conversions
+ * use this queried value, so the same binary is correct on every target.
+ *
  * Design notes
  * ────────────
  * • Up to 6 capture channels across 2 MCPWM groups (3 channels per group).
@@ -25,6 +36,7 @@
 #include "driver/mcpwm_cap.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_private/esp_clk.h"
 
 #include "pulse_decoder.h"
 
@@ -32,7 +44,7 @@
 static const char *TAG = "pulse-decoder";
 
 #define MAX_CHANNELS            6
-#define MAX_CHANNELS_PER_UNIT   3   /* ESP32 MCPWM: 3 capture channels / group */
+#define MAX_CHANNELS_PER_UNIT   3
 #define TOTAL_CAPTURE_GROUPS    2
 #define QUEUE_LENGTH            100
 
@@ -45,11 +57,11 @@ static const char *TAG = "pulse-decoder";
 typedef struct {
     mcpwm_cap_timer_handle_t      cap_timer;
     mcpwm_capture_timer_config_t  cap_conf;
+    uint32_t                      resolution_hz;  /* actual hw resolution, queried after creation */
 } cap_timer_t;
 
 /*
  * Class-level data — one instance shared by all pulse_decoder objects.
- * Holds the queue, the processing task, and the two possible timers.
  */
 typedef struct {
     QueueHandle_t              queue;
@@ -68,14 +80,15 @@ static pwm_capture_class_data_t g_class = {0};
  */
 typedef struct {
     uint8_t                    gpio_num;
-    mcpwm_cap_timer_handle_t   cap_timer;      /* shared timer handle for the group  */
+    mcpwm_cap_timer_handle_t   cap_timer;
     mcpwm_cap_channel_handle_t cap_chan;
     pulse_decoder_interface_t  interface;       /* embedded vtable — always use &this */
     uint32_t                   time_stamp;      /* rising-edge tick captured in ISR   */
     uint8_t                    total_signals;
-    uint32_t                   min_width_ticks; /* ISR filter: precomputed tick floor */
-    uint32_t                   max_width_ticks; /* ISR filter: precomputed tick ceil  */
-    uint32_t                   min_width_us;    /* task filter: µs floor              */
+    uint32_t                   timer_resolution_hz; /* copied from cap_timer_t at create time */
+    uint32_t                   min_width_ticks; /* ISR filter lower bound in ticks    */
+    uint32_t                   max_width_ticks; /* ISR filter upper bound in ticks    */
+    uint32_t                   min_width_us;    /* task filter lower bound in µs      */
     uint32_t                   tolerance;       /* ± µs tolerance for ID matching     */
     uint32_t                   pulse_widths[];  /* sorted expected widths in µs (FAM) */
 } pulse_decoder_t;
@@ -95,19 +108,28 @@ static int compare_uint32(const void *a, const void *b)
     return (ua > ub) - (ua < ub);
 }
 
-static void sort_uint32_array(const uint32_t *input,
-                               uint32_t       *output,
-                               size_t          n)
+static void sort_uint32_array(const uint32_t *input, uint32_t *output, size_t n)
 {
     memcpy(output, input, n * sizeof(uint32_t));
     qsort(output, n, sizeof(uint32_t), compare_uint32);
+}
+
+/* Convert µs → ticks using the object's actual timer resolution */
+static uint32_t us_to_ticks(const pulse_decoder_t *obj, uint32_t us)
+{
+    return (uint32_t)((uint64_t)us * obj->timer_resolution_hz / 1000000ULL);
+}
+
+/* Convert ticks → µs using the object's actual timer resolution */
+static uint32_t ticks_to_us(const pulse_decoder_t *obj, uint32_t ticks)
+{
+    return (uint32_t)((uint64_t)ticks * 1000000ULL / obj->timer_resolution_hz);
 }
 
 /* Resolve a received pulse width (µs) to an index in pulse_widths[]. */
 static int match_pulse_id(const pulse_decoder_t *obj, uint32_t received_us)
 {
     for (uint8_t i = 0; i < obj->total_signals; i++) {
-        /* Unsigned subtraction — no abs() on signed types needed */
         uint32_t diff = (received_us >= obj->pulse_widths[i])
                         ? received_us - obj->pulse_widths[i]
                         : obj->pulse_widths[i] - received_us;
@@ -131,8 +153,7 @@ static void task_processCaptureQueue(void *args)
 
         const pulse_decoder_t *obj = evt.cap_obj;
 
-        /* Timer resolution is 1 MHz so pulse_width_ticks is already in µs */
-        uint32_t pulse_us = evt.pulse_width_ticks;
+        uint32_t pulse_us = ticks_to_us(obj, evt.pulse_width_ticks);
 
         if (pulse_us < obj->min_width_us)
             continue;
@@ -150,21 +171,19 @@ static void task_processCaptureQueue(void *args)
 
 /* ── ISR callback ────────────────────────────────────────────────────────── */
 
-static bool captureCallback(mcpwm_cap_channel_handle_t          cap_chan,
-                             const mcpwm_capture_event_data_t   *edata,
-                             void                               *user_data)
+static bool captureCallback(mcpwm_cap_channel_handle_t        cap_chan,
+                             const mcpwm_capture_event_data_t *edata,
+                             void                             *user_data)
 {
     (void)cap_chan;
-    pulse_decoder_t *self          = (pulse_decoder_t *)user_data;
-    BaseType_t       higher_prio   = pdFALSE;
+    pulse_decoder_t *self        = (pulse_decoder_t *)user_data;
+    BaseType_t       higher_prio = pdFALSE;
 
     if (edata->cap_edge == MCPWM_CAP_EDGE_POS) {
-        /* Record rising edge — nothing to enqueue yet */
         self->time_stamp = edata->cap_value;
     } else {
         uint32_t width = edata->cap_value - self->time_stamp;
 
-        /* Quick tick-domain filter before hitting the queue */
         if (width < self->min_width_ticks || width > self->max_width_ticks)
             return false;
 
@@ -209,34 +228,19 @@ static int stopMonitoring(struct pulse_decoder_interface *self)
     return mcpwm_capture_channel_disable(obj->cap_chan);
 }
 
-/*
- * destroyDecoder
- *
- * Releases the capture channel and frees the object.
- * When the last object is destroyed the shared queue, task, and timers are
- * also torn down so the module returns to a clean initial state.
- *
- * NOTE: Timers are shared across up to three instances in the same MCPWM
- * group.  This implementation defers timer teardown until object_count hits
- * zero, which is safe as long as callers destroy all instances before creating
- * new ones.  Do not call destroy() from an ISR context.
- */
 static int destroyDecoder(struct pulse_decoder_interface *self)
 {
     pulse_decoder_t *obj = CONTAINER_OF(self, pulse_decoder_t, interface);
     esp_err_t        ret = ESP_OK;
 
-    /* Disable then delete the individual capture channel */
     mcpwm_capture_channel_disable(obj->cap_chan);
     ret = mcpwm_del_capture_channel(obj->cap_chan);
     if (ret != ESP_OK)
         ESP_LOGW(TAG, "del_capture_channel failed: %s", esp_err_to_name(ret));
 
-    /* Decrement before shared-resource teardown */
     if (g_class.object_count > 0)
         g_class.object_count--;
 
-    /* Tear down shared resources when the last instance is gone */
     if (g_class.object_count == 0) {
         if (g_class.capture_task) {
             vTaskDelete(g_class.capture_task);
@@ -251,7 +255,8 @@ static int destroyDecoder(struct pulse_decoder_interface *self)
                 mcpwm_capture_timer_stop(g_class.timer[g].cap_timer);
                 mcpwm_capture_timer_disable(g_class.timer[g].cap_timer);
                 mcpwm_del_capture_timer(g_class.timer[g].cap_timer);
-                g_class.timer[g].cap_timer = NULL;
+                g_class.timer[g].cap_timer    = NULL;
+                g_class.timer[g].resolution_hz = 0;
             }
         }
         ESP_LOGI(TAG, "All capture resources released");
@@ -261,7 +266,7 @@ static int destroyDecoder(struct pulse_decoder_interface *self)
     return (int)ret;
 }
 
-/* ── Class-level initialiser (called once per pulseDecoderCreate) ─────────── */
+/* ── Class-level initialiser ─────────────────────────────────────────────── */
 
 static esp_err_t pulseDecoderClassDataInit(void)
 {
@@ -270,7 +275,7 @@ static esp_err_t pulseDecoderClassDataInit(void)
         return ERR_CAPTURE_CAP_UNIT_EXCEED;
     }
 
-    /* Create queue + task once, on first call */
+    /* Create queue + task once on first call */
     if (g_class.queue == NULL) {
         g_class.queue = xQueueCreate(QUEUE_LENGTH, sizeof(capture_event_data_t));
         if (!g_class.queue) {
@@ -279,10 +284,8 @@ static esp_err_t pulseDecoderClassDataInit(void)
         }
 
         if (xTaskCreate(task_processCaptureQueue,
-                        "captureTask",
-                        4096,
-                        &g_class,
-                        5,
+                        "captureTask", 4096,
+                        &g_class, 5,
                         &g_class.capture_task) != pdPASS) {
             vQueueDelete(g_class.queue);
             g_class.queue = NULL;
@@ -291,17 +294,21 @@ static esp_err_t pulseDecoderClassDataInit(void)
         }
     }
 
-    /*
-     * A new MCPWM timer is needed each time we step into a new group, i.e.
-     * at object_count == 0 and object_count == 3.
-     */
+    /* Create a new timer whenever we step into a new group (every 3 objects) */
     if (g_class.object_count % MAX_CHANNELS_PER_UNIT == 0) {
         uint8_t group = g_class.object_count / MAX_CHANNELS_PER_UNIT;
 
         mcpwm_capture_timer_config_t conf = {
-            .clk_src      = MCPWM_CAPTURE_CLK_SRC_DEFAULT,
-            .group_id     = (int)group,
-            .resolution_hz = 1000000,   /* 1 tick = 1 µs — cap_value is directly in µs */
+            .clk_src       = MCPWM_CAPTURE_CLK_SRC_DEFAULT,
+            .group_id      = (int)group,
+            /*
+             * Request 1 MHz (1 tick = 1 µs).
+             * Honoured on ESP32-S3 / C3 / H2 and any chip with
+             * SOC_MCPWM_CAPTURE_CLK_FROM_GROUP.
+             * Silently ignored on the original ESP32 (no prescaler).
+             * We always query the actual value below.
+             */
+            .resolution_hz = 1000000,
         };
 
         esp_err_t ret = mcpwm_new_capture_timer(&conf,
@@ -311,8 +318,28 @@ static esp_err_t pulseDecoderClassDataInit(void)
                      group, esp_err_to_name(ret));
             return ret;
         }
-        g_class.timer[group].cap_conf = conf;
-        ESP_LOGI(TAG, "Created capture timer for group %d", group);
+
+        /*
+         * Query the resolution the hardware is ACTUALLY running at.
+         * This is the only portable way to get the right value —
+         * on ESP32 it returns APB (80 MHz), on newer chips it returns
+         * whatever was accepted from resolution_hz.
+         */
+        uint32_t actual_hz = 0;
+        ret = mcpwm_capture_timer_get_resolution(g_class.timer[group].cap_timer,
+                                                  &actual_hz);
+        if (ret != ESP_OK || actual_hz == 0) {
+            /* Should never happen, but fall back to APB if it does */
+            actual_hz = (uint32_t)esp_clk_apb_freq();
+            ESP_LOGW(TAG, "get_resolution failed, falling back to APB (%lu Hz)",
+                     (unsigned long)actual_hz);
+        }
+
+        g_class.timer[group].cap_conf      = conf;
+        g_class.timer[group].resolution_hz = actual_hz;
+
+        ESP_LOGI(TAG, "Created capture timer for group %d, actual resolution %lu Hz",
+                 group, (unsigned long)actual_hz);
     }
 
     g_class.object_count++;
@@ -327,18 +354,15 @@ esp_err_t pulseDecoderCreate(pulse_decoder_config_t    *config,
     if (!config || !out_if || !config->pulse_widths_us || config->total_signals == 0)
         return ESP_ERR_INVALID_ARG;
 
-    /* Reserve a slot in the class data */
     esp_err_t ret = pulseDecoderClassDataInit();
     if (ret != ESP_OK)
         return ret;
 
-    /* Register callback / context (shared; last caller wins) */
     if (config->cb)
         g_class.cb = config->cb;
     if (config->context)
         g_class.context = config->context;
 
-    /* Allocate object + FAM for pulse widths */
     pulse_decoder_t *obj =
         calloc(1, sizeof(pulse_decoder_t) +
                   config->total_signals * sizeof(uint32_t));
@@ -351,44 +375,43 @@ esp_err_t pulseDecoderCreate(pulse_decoder_config_t    *config,
     obj->total_signals = config->total_signals;
     obj->tolerance     = config->tolerance_us;
 
-    /* Sort widths ascending so index 0 = narrowest pulse */
     sort_uint32_array(config->pulse_widths_us,
                       obj->pulse_widths,
                       config->total_signals);
 
+    /* Assign timer — group is determined by how many objects already exist */
+    uint8_t index  = g_class.object_count - 1;
+    uint8_t group  = index / MAX_CHANNELS_PER_UNIT;
+    obj->cap_timer             = g_class.timer[group].cap_timer;
+    obj->timer_resolution_hz   = g_class.timer[group].resolution_hz;
+
     /*
      * Expand the filter window by tolerance on both sides so that a valid
-     * pulse sitting ±tolerance away from the narrowest/widest registered
-     * width is not discarded before match_pulse_id() can evaluate it.
-     * Guard the lower bound against underflow.
+     * pulse at ±tolerance from the narrowest/widest registered width is not
+     * dropped before match_pulse_id() can evaluate it.
      */
-    uint32_t min_us = obj->pulse_widths[0];
-    uint32_t max_us = obj->pulse_widths[config->total_signals - 1];
-
-    obj->min_width_us = (min_us > config->tolerance_us)
-                        ? min_us - config->tolerance_us
-                        : 0;
+    uint32_t min_us        = obj->pulse_widths[0];
+    uint32_t max_us        = obj->pulse_widths[config->total_signals - 1];
+    uint32_t filter_min_us = (min_us > config->tolerance_us)
+                             ? min_us - config->tolerance_us : 0;
     uint32_t filter_max_us = max_us + config->tolerance_us;
 
-    /*
-     * Because the timer is configured at 1 MHz (1 tick = 1 µs), the ISR's
-     * cap_value is already in µs.  Tick thresholds are identical to the µs
-     * thresholds — no conversion needed.
-     */
-    obj->min_width_ticks = obj->min_width_us;
-    obj->max_width_ticks = filter_max_us;
+    obj->min_width_us    = filter_min_us;
+    obj->min_width_ticks = us_to_ticks(obj, filter_min_us);
+    obj->max_width_ticks = us_to_ticks(obj, filter_max_us);
 
-    /* Select the timer for this instance's MCPWM group */
-    uint8_t index  = g_class.object_count - 1;  /* already incremented */
-    uint8_t group  = index / MAX_CHANNELS_PER_UNIT;
-    obj->cap_timer = g_class.timer[group].cap_timer;
+    ESP_LOGI(TAG, "GPIO %d: filter window %lu–%lu µs (%lu–%lu ticks @ %lu Hz)",
+             obj->gpio_num,
+             (unsigned long)filter_min_us, (unsigned long)filter_max_us,
+             (unsigned long)obj->min_width_ticks, (unsigned long)obj->max_width_ticks,
+             (unsigned long)obj->timer_resolution_hz);
 
     /* Create capture channel */
     mcpwm_capture_channel_config_t ch_conf = {
-        .gpio_num        = obj->gpio_num,
-        .prescale        = 1,
-        .flags.neg_edge  = true,
-        .flags.pos_edge  = true,
+        .gpio_num       = obj->gpio_num,
+        .prescale       = 1,
+        .flags.neg_edge = true,
+        .flags.pos_edge = true,
     };
 
     ret = mcpwm_new_capture_channel(obj->cap_timer, &ch_conf, &obj->cap_chan);
@@ -397,7 +420,6 @@ esp_err_t pulseDecoderCreate(pulse_decoder_config_t    *config,
         goto err_free;
     }
 
-    /* Register ISR callback */
     mcpwm_capture_event_callbacks_t cbs = { .on_cap = captureCallback };
     ret = mcpwm_capture_channel_register_event_callbacks(obj->cap_chan, &cbs, obj);
     if (ret != ESP_OK) {
@@ -406,17 +428,10 @@ esp_err_t pulseDecoderCreate(pulse_decoder_config_t    *config,
         goto err_free;
     }
 
-    /* Wire up the virtual interface */
     obj->interface.startMonitoring = startMonitoring;
     obj->interface.stopMonitoring  = stopMonitoring;
     obj->interface.destroy         = destroyDecoder;
 
-    /*
-     * Return a POINTER to the embedded interface, not a copy.
-     * This is critical: CONTAINER_OF inside the vtable methods uses the
-     * address of obj->interface to locate obj.  A copied struct would have a
-     * different address and CONTAINER_OF would compute garbage.
-     */
     *out_if = &obj->interface;
 
     ESP_LOGI(TAG, "Created decoder on GPIO %d (group %d, index %d)",
