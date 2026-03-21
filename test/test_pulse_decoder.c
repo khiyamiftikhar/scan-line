@@ -32,6 +32,7 @@
 
 #include "unity.h"
 #include "driver/gpio.h"
+#include "esp_log.h"
 #include "esp_rom_sys.h"    /* esp_rom_delay_us */
 
 #include "pulse_decoder.h"
@@ -48,6 +49,7 @@
 
 /* ── Maximum wait for a callback before the test fails ──────────────────── */
 #define CALLBACK_TIMEOUT_MS  200
+static const char* TAG="test decoder";
 
 /* ── State shared between the callback and the test task ────────────────── */
 typedef struct {
@@ -91,6 +93,7 @@ static void init_tx_gpio(void)
 
 static void generate_pulse(uint32_t width_us)
 {
+    ESP_LOGI(TAG,"generating pulse %lu µs",width_us);
     gpio_set_level(TX_GPIO, 0);
     esp_rom_delay_us(50);           /* ensure a clean LOW before rising edge  */
 
@@ -162,8 +165,9 @@ TEST_CASE("Exact pulse widths are identified correctly", "[pulse_decoder]")
     for (int i = 0; i < 3; i++) {
         g_ctx.last_id = -1;
 
+        //Generate pulses
         generate_pulse(sigs[i].width_us);
-
+        //Wait for the signaling semaphore
         bool got = xSemaphoreTake(g_ctx.sem, pdMS_TO_TICKS(CALLBACK_TIMEOUT_MS));
         TEST_ASSERT_TRUE_MESSAGE(got, "Callback timed out");
         TEST_ASSERT_EQUAL(sigs[i].expected_id, g_ctx.last_id);
