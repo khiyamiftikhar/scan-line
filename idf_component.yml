@@ -1,4 +1,4 @@
-version: "0.1.5"
+version: "0.1.2"
 description: "Component for identifying multiple PWM signals on GPIO, using the MCPWM capture peripheral"
 url: "https://github.com/embedblocks/pulse-decoder"
 license: "MIT"

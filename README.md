@@ -26,14 +26,14 @@ Instead of polling or writing ISR code yourself, register the pulse widths your 
 ## Using ESP-IDF Component Manager (Recommended)
 
 ```bash
-idf.py add-dependency "embedblocks/pulse_decoder^0.1.5"
+idf.py add-dependency "embedblocks/pulse_decoder^0.1.2"
 ```
 
 Or in your project's `idf_component.yml`:
 
 ```yaml
 dependencies:
-  embedblocks/pulse_decoder: "^0.1.5"
+  embedblocks/pulse_decoder: "^0.1.2"
 ```
 
 ---
