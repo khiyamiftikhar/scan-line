@@ -155,8 +155,13 @@ static void task_processCaptureQueue(void *args)
 
         uint32_t pulse_us = ticks_to_us(obj, evt.pulse_width_ticks);
 
+        ESP_LOGI(TAG, "GPIO %d: measured pulse = %lu µs",
+            obj->gpio_num, (unsigned long)pulse_us);
+
         if (pulse_us < obj->min_width_us)
             continue;
+
+
 
         int id = match_pulse_id(obj, pulse_us);
         if (id >= 0 && cd->cb) {
