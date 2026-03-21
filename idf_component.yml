@@ -13,4 +13,4 @@ files:
       - "docs/**/*"
       - "dist/**/*"
       - "*.docx"
-      - "*.txt"
+      - "R**.txt"
