@@ -14,6 +14,14 @@
 #define     ERR_CAPTURE_UNREGISTERD_PULSE_WIDTH (ERR_CAPTURE_BASE-4)
 
 
+typedef struct pulse_decoder_event_data{
+
+    uint8_t source_number;          //based on pwm width array
+    uint8_t line_number;            //1 , 2 3 instead of gpio number 222,34 etc
+
+}pulse_decoder_event_data_t;
+
+
 
 
 
@@ -42,6 +50,7 @@ typedef struct{
     uint8_t total_signals;          //length of pulse_width_us array
     uint32_t tolerance_us;         //+/- value   
     pulseDecoderEventCallback cb;
+    void* context;
 }pulse_decoder_config_t;
 
 
