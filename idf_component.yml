@@ -12,3 +12,5 @@ files:
       - ".git/**/*"
       - "docs/**/*"
       - "dist/**/*"
+      - "*.docx"
+      - "*.txt"
